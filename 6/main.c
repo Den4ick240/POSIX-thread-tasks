@@ -14,19 +14,9 @@
 #define ERROR_CODE -1
 #define FILE_BUFFER_SIZE 8
 
-void *cpFunction(void *arg);
+size_t direntLen;
 
-size_t getDirentLen(char *src) {
-    static size_t direntLen = 0;
-    if (direntLen != 0)
-        return direntLen;
-    if (src != NULL) {
-        ssize_t pathlen = pathconf(src, _PC_NAME_MAX);
-        pathlen = (pathlen == -1 ? 255 : pathlen);
-        direntLen = offsetof(struct dirent, d_name) + pathlen + 1;
-    }
-    return 0;
-}
+void *cpFunction(void *arg);
 
 char **allocateCharsets(size_t len1, size_t len2) {
     char **out = (char **) malloc(sizeof(char *) * 2);
@@ -36,18 +26,21 @@ char **allocateCharsets(size_t len1, size_t len2) {
 }
 
 char **buildNewPath(const char *src, const char *dest, const char *add) {
-    char **out;
+    char **result;
     size_t nameLen = strlen(add);
     size_t lenSrc = strlen(src) + nameLen + 1;
     size_t lenDest = strlen(dest) + nameLen + 1;
-    out = allocateCharsets(lenSrc, lenDest);
-    strcpy(out[0], src);
-    strcat(out[0], "/");
-    strcat(out[0], add);
-    strcpy(out[1], dest);
-    strcat(out[1], "/");
-    strcat(out[1], add);
-    return out;
+
+    result = allocateCharsets(lenSrc, lenDest);
+
+    strcpy(result[0], src);
+    strcat(result[0], "/");
+    strcat(result[0], add);
+
+    strcpy(result[1], dest);
+    strcat(result[1], "/");
+    strcat(result[1], add);
+    return result;
 }
 
 void freeCharsets(char **sets) {
@@ -69,7 +62,7 @@ int copyFolder(const char *src, const char *dest, mode_t mode) {
             return ERROR_CODE;
         }
     }
-    entry = (struct dirent *) malloc(getDirentLen(NULL));
+    entry = (struct dirent *) malloc(direntLen);
     if (entry == NULL) {
         perror(strerror(errno));
     }
@@ -86,7 +79,7 @@ int copyFolder(const char *src, const char *dest, mode_t mode) {
             pthreadCreateRetVal = pthread_create(&thread, NULL, cpFunction, (void *) newPaths);
         } while (pthreadCreateRetVal != 0 && errno == EAGAIN);
         if (pthreadCreateRetVal != 0) {
-            fprintf(stderr, "Couldn't copy %s\n", newPaths[0], strerror(errno));
+            fprintf(stderr, "Couldn't copy %s, %s\n", newPaths[0], strerror(errno));
             free(newPaths);
         }
     }
@@ -151,36 +144,36 @@ int copyFile(const char *pathSrc, const char *pathDest, mode_t mode) {
 void *cpFunction(void *arg) {
     int errorCode;
     struct stat statBuffer;
-    char *pathSrc = ((char **) arg)[0];
-    char *pathDist = ((char **) arg)[1];
+    char *sourcePath = ((char **) arg)[0];
+    char *destinationPath = ((char **) arg)[1];
 
-    if (stat(pathSrc, &statBuffer) != 0) {
+    if (stat(sourcePath, &statBuffer) != 0) {
         fprintf(stderr, "%s, %s\n", strerror(errno));
         freeCharsets(arg);
         return (void *) ERROR_CODE;
     }
     if (S_ISDIR(statBuffer.st_mode))
-        copyFolder(pathSrc, pathDist, statBuffer.st_mode);
+        copyFolder(sourcePath, destinationPath, statBuffer.st_mode);
     else if (S_ISREG(statBuffer.st_mode))
-        copyFile(pathSrc, pathDist, statBuffer.st_mode);
+        copyFile(sourcePath, destinationPath, statBuffer.st_mode);
     freeCharsets(arg);
 }
 
-char **prepareArgs(char **args) {
-    struct stat buf;
+char **validateArguments(char **args) {
+    struct stat buffer;
     int i;
-    if (stat(args[0], &buf) == -1) {
+    if (stat(args[0], &buffer) == -1) {
         fprintf(stderr, "Bad argument: %s - %s\n", args[0], strerror(errno));
         return NULL;
     }
     int len[2] = {strlen(args[0]), strlen(args[1])};
-    char **out = allocateCharsets(len[0], len[1]);
+    char **result = allocateCharsets(len[0], len[1]);
     for (i = 0; i < 2; i++) {
         strcpy(out[i], args[i]);
         if (out[i][len[i] - 1] == '/')
             out[i][len[i] - 1] = 0;
     }
-    return out;
+    return result;
 }
 
 int main(int argc, char *argv[]) {
@@ -188,11 +181,14 @@ int main(int argc, char *argv[]) {
         printf("usage %s <copy source> <copy destination>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
-    char **in = prepareArgs(argv + 1);
-    if (in == NULL) {
+    char **sourceAndDestinationPaths = validateArguments(argv + 1);
+    if (sourceAndDestinationPaths == NULL) {
         exit(EXIT_FAILURE);
     }
-    getDirentLen(in[0]);
-    cpFunction(in);
+    ssize_t pathlen = pathconf(src, _PC_NAME_MAX);
+    pathlen = (pathlen == -1 ? 255 : pathlen);
+    direntLen = offsetof(struct dirent, d_name) + pathlen + 1;
+
+    cpFunction(sourceAndDestinationPaths);
     pthread_exit(NULL);
 }
