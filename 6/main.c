@@ -25,21 +25,21 @@ char **allocateCharsets(size_t len1, size_t len2) {
     return out;
 }
 
-char **buildNewPath(const char *src, const char *dest, const char *add) {
+char **buildNewPath(const char *sourcePath, const char *destinationPath, const char *additionalPath) {
     char **result;
-    size_t nameLen = strlen(add);
-    size_t lenSrc = strlen(src) + nameLen + 1;
-    size_t lenDest = strlen(dest) + nameLen + 1;
+    size_t additionalLen = strlen(additionalPath);
+    size_t sourcePathLen = strlen(sourcePath) + additionalLen + 1;
+    size_t destinationPathLen = strlen(destinationPath) + additionalLen + 1;
 
-    result = allocateCharsets(lenSrc, lenDest);
+    result = allocateCharsets(sourcePathLen, destinationPathLen);
 
-    strcpy(result[0], src);
+    strcpy(result[0], sourcePath);
     strcat(result[0], "/");
-    strcat(result[0], add);
+    strcat(result[0], additionalPath);
 
-    strcpy(result[1], dest);
+    strcpy(result[1], destinationPath);
     strcat(result[1], "/");
-    strcat(result[1], add);
+    strcat(result[1], additionalPath);
     return result;
 }
 
@@ -49,16 +49,16 @@ void freeCharsets(char **sets) {
     free(sets);
 }
 
-int copyFolder(const char *src, const char *dest, mode_t mode) {
+int copyFolder(const char *sourcePath, const char *destinationPath, mode_t mode) {
     DIR *dir;
     struct dirent *entry, *result;
-    if (mkdir(dest, mode) == -1 && errno != EEXIST) {
-        fprintf(stderr, "Couldn't create directory %s, %s\n", dest, strerror(errno));
+    if (mkdir(destinationPath, mode) == -1 && errno != EEXIST) {
+        fprintf(stderr, "Couldn't create directory %s, %s\n", destinationPath, strerror(errno));
         return ERROR_CODE;
     }
-    while ((dir = opendir(src)) == NULL) {
+    while ((dir = opendir(sourcePath)) == NULL) {
         if (errno != EMFILE) {
-            printf("Couldn't open directory %s, %s\n", src, strerror(errno));
+            printf("Couldn't open directory %s, %s\n", sourcePath, strerror(errno));
             return ERROR_CODE;
         }
     }
@@ -74,7 +74,7 @@ int copyFolder(const char *src, const char *dest, mode_t mode) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
-        newPaths = buildNewPath(src, dest, entry->d_name);
+        newPaths = buildNewPath(sourcePath, destinationPath, entry->d_name);
         do {
             pthreadCreateRetVal = pthread_create(&thread, NULL, cpFunction, (void *) newPaths);
         } while (pthreadCreateRetVal != 0 && errno == EAGAIN);
@@ -90,22 +90,22 @@ int copyFolder(const char *src, const char *dest, mode_t mode) {
     return 0;
 }
 
-int copyFile(const char *pathSrc, const char *pathDest, mode_t mode) {
+int copyFile(const char *sourcePath, const char *destinationPath, mode_t mode) {
     static const int OPEN_FILE_FLAGS = O_WRONLY | O_CREAT | O_EXCL;
     int fdin, fdout;
     int bytesRead;
     char buffer[FILE_BUFFER_SIZE];
     int returnValue = 0;
 
-    while ((fdin = open(pathSrc, O_RDONLY)) == -1) {
+    while ((fdin = open(sourcePath, O_RDONLY)) == -1) {
         if (errno != EMFILE) {
-            fprintf(stderr, "Couldn't open file %s, %s\n", pathSrc, strerror(errno));
+            fprintf(stderr, "Couldn't open file %s, %s\n", sourcePath, strerror(errno));
             return ERROR_CODE;
         }
     }
-    while ((fdout = open(pathDest, OPEN_FILE_FLAGS, mode)) == -1) {
+    while ((fdout = open(destinationPath, OPEN_FILE_FLAGS, mode)) == -1) {
         if (errno != EMFILE) {
-            fprintf(stderr, "Couldn't open file %s, %s\n", pathDest, strerror(errno));
+            fprintf(stderr, "Couldn't open file %s, %s\n", destinationPath, strerror(errno));
             if (close(fdin) != 0)
                 perror(strerror(errno));
             return ERROR_CODE;
@@ -169,9 +169,9 @@ char **validateArguments(char **args) {
     int len[2] = {strlen(args[0]), strlen(args[1])};
     char **result = allocateCharsets(len[0], len[1]);
     for (i = 0; i < 2; i++) {
-        strcpy(out[i], args[i]);
-        if (out[i][len[i] - 1] == '/')
-            out[i][len[i] - 1] = 0;
+        strcpy(result[i], args[i]);
+        if (result[i][len[i] - 1] == '/')
+            result[i][len[i] - 1] = 0;
     }
     return result;
 }
@@ -185,7 +185,7 @@ int main(int argc, char *argv[]) {
     if (sourceAndDestinationPaths == NULL) {
         exit(EXIT_FAILURE);
     }
-    ssize_t pathlen = pathconf(src, _PC_NAME_MAX);
+    ssize_t pathlen = pathconf(sourceAndDestinationPaths[0], _PC_NAME_MAX);
     pathlen = (pathlen == -1 ? 255 : pathlen);
     direntLen = offsetof(struct dirent, d_name) + pathlen + 1;
 
