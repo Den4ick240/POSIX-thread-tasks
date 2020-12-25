@@ -15,7 +15,7 @@ int run_server_handler_thread(struct server_handler_args *args);
 
 void *listen_client_thread(void *arg);
 
-int handle_new_connection(int sockfd);
+void handle_new_connection(int sockfd);
 
 int main(int argc, char *argv[]) {
     struct sockaddr_in my_addr;
