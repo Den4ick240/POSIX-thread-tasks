@@ -1,6 +1,6 @@
 #include "handlers.h"
 
-int try_parsing_response(struct server_handler_args *args, char *buffer, int res) {
+void try_parsing_response(struct server_handler_args *args, char *buffer, int res) {
     struct phr_header headers[NUM_HEADERS];
     int minor_version, status;
     size_t msg_len, num_headers;
@@ -11,7 +11,8 @@ int try_parsing_response(struct server_handler_args *args, char *buffer, int res
         perror("Realloc buffer for response didn't work");
         args->header_finished_flag = 1;
         realloc_buffer_destroy(&args->header_buffer);
-        return -1;
+        cache_map_remove(args->cache_map, args->cache);
+        return;
     }
     num_headers = NUM_HEADERS;
     res = phr_parse_response((const char *) args->header_buffer.buffer,
@@ -29,10 +30,10 @@ int try_parsing_response(struct server_handler_args *args, char *buffer, int res
         cache_map_remove(args->cache_map, args->cache);
         puts("Cache removed from map as it its status is not OK");
     }
-    printf("---------------------------------------------\n"
+    printf("---------------------------------------------\n"//Дебажный вывод надо будет убрать
            "received RESPONSE:"
            "%.*s\n"
-           "---------------------------------------------\n", args->header_buffer.data_len, args->header_buffer.buffer);
+           "---------------------------------------------\n", (int)args->header_buffer.data_len, args->header_buffer.buffer);
     args->header_finished_flag = 1;
     realloc_buffer_destroy(&args->header_buffer);
 }
@@ -47,7 +48,6 @@ int server_handle_in(struct server_handler_args *args) {
         return HANDLER_ERROR;
     }
     if (!args->header_finished_flag) {
-        puts("Trying to parse response from server");
         try_parsing_response(args, buffer, res);
     }
     if (res == 0) {
@@ -112,9 +112,7 @@ int connect_to_server(char *host) {
         fprintf(stderr, "Error: connect() failed with %s\n", strerror(errno));
         return -1;
     }
-#ifdef DEBUG
     printf("Connected to %s\n", host);
-#endif
     return sock;
 }
 
@@ -181,8 +179,8 @@ int client_handle_request(struct client_handler_args *client,
                 memcpy(host, headers[i].value, headers[i].value_len);
                 host[headers[i].value_len] = '\0';
             } else {
-                memcpy(host, headers[i].value, MAX_HOST_NAME_LEN);
-                host[MAX_HOST_NAME_LEN] = '\0';
+                perror("Host name is too long");
+                return HANDLER_ERROR;
             }
             break;
         }
@@ -192,8 +190,11 @@ int client_handle_request(struct client_handler_args *client,
         return HANDLER_ERROR;
     }
     i = strlen(host);
+    if (path_len + i < CACHE_KEY_MAX_SIZE) {
+        perror("Path is too long");
+    }
     strcpy(key, host);
-    strncat(key, path, ((path_len + i < CACHE_KEY_MAX_SIZE) ? path_len : (CACHE_KEY_MAX_SIZE - i)));
+    strncat(key, path, path_len);
     if (strncmp(method, "GET\0", method_len) != 0) {
         printf("Method %.*s is not supposed to be cached\n", method_len, method);
         cache = cache_create(key);
@@ -275,7 +276,7 @@ int client_handle_out(struct client_handler_args *args) {
         return HANDLER_ERROR;
     }
     cache_reader_skip_bytes(&args->reader, res);
-    return 0;
+    return HANDLER_CONTINUE;
 }
 
 int client_handler_args_init(struct client_handler_args *args,

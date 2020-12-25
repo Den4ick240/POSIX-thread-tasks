@@ -98,26 +98,40 @@ int create_detached_thread(void *(*func)(void *), void *arg) {
         fprintf(stderr, "Couldn't create new thread: %s\n", strerror(res));
         return -1;
     }
+    return 0;
 }
 
-#define RUN_HANDLER(a, b) while (running && res != HANDLER_ERROR) { \
-    res = (a);                          \
-    if (res == HANDLER_FINISHED) break; \
-    if (res == HANDLER_CONTINUE || res == HANDLER_EINTR) continue; \
-    fprintf(stderr, (b), strerror(errno));\
-}
+//#define RUN_HANDLER(a, b) while (running && res != HANDLER_ERROR) { \
+//    res = (a);                          \
+//    if (res == HANDLER_FINISHED) break; \
+//    if (res == HANDLER_CONTINUE || res == HANDLER_EINTR) continue; \
+//    fprintf(stderr, (b), strerror(errno));\
+//}
 
 void *server_thread(void *_arg) {
     struct server_handler_args *arg = (struct server_handler_args *) _arg;
     int res;
     puts("Starting sending request to server");
-    RUN_HANDLER(server_handle_out(arg),
-            "Error while sending data to server: %s\n");
+    while (running && res != HANDLER_ERROR) {
+        res = server_handle_out(arg);
+        if (res == HANDLER_FINISHED) break;
+        if (res == HANDLER_CONTINUE || res == HANDLER_EINTR) continue;
+        fprintf(stderr, "Error while sending data to server: %s\n", strerror(errno));
+    }
+//    RUN_HANDLER(server_handle_out(arg),
+//                "Error while sending data to server: %s\n");
     puts("Sending request to server finished");
-    RUN_HANDLER(server_handle_in(arg),
-                "Error while receiving data from server: %s\n");
+    while (running && res != HANDLER_ERROR) {
+        res = server_handle_in(arg);
+        if (res == HANDLER_FINISHED) break;
+        if (res == HANDLER_CONTINUE || res == HANDLER_EINTR) continue;
+        fprintf(stderr, "Error while receiving data from server: %s\n", strerror(errno));
+    }
+//    RUN_HANDLER(server_handle_in(arg),
+//                "Error while receiving data from server: %s\n");
     puts("Finished receiving data from server");
     destroy_server(arg);
+    pthread_exit(NULL);
 }
 
 void *listen_client_thread(void *arg) {
@@ -125,13 +139,26 @@ void *listen_client_thread(void *arg) {
     int sockfd = (int) arg;
     struct client_handler_args args;
     client_handler_args_init(&args, sockfd, run_server_handler_thread, &map);
-    RUN_HANDLER(client_handle_in(&args),
-            "Error while receiving request from client: %s\n");
-
-    RUN_HANDLER(client_handle_out(&args),
-                "Error while sending data to client: %s\n");
+    while (running && res != HANDLER_ERROR) {
+        res = client_handle_in(arg);
+        if (res == HANDLER_FINISHED) break;
+        if (res == HANDLER_CONTINUE || res == HANDLER_EINTR) continue;
+        fprintf(stderr, "Error while receiving data from server: %s\n", strerror(errno));
+    }
+    while (running && res != HANDLER_ERROR) {
+        res = client_handle_out(arg);
+        if (res == HANDLER_FINISHED) break;
+        if (res == HANDLER_CONTINUE || res == HANDLER_EINTR) continue;
+        fprintf(stderr, "Error while sending data to server: %s\n", strerror(errno));
+    }
+//    RUN_HANDLER(client_handle_in(&args),
+//                "Error while receiving request from client: %s\n");
+//
+//    RUN_HANDLER(client_handle_out(&args),
+//                "Error while sending data to client: %s\n");
 
     destroy_client(&args);
+    pthread_exit(NULL);
 }
 
 int run_server_handler_thread(struct server_handler_args *args) {
@@ -145,7 +172,7 @@ int run_server_handler_thread(struct server_handler_args *args) {
 }
 
 
-int handle_new_connection(int sockfd) {
+void handle_new_connection(int sockfd) {
     int res;
     printf("Starting handling new connection\n");
     res = create_detached_thread(listen_client_thread, (void *) sockfd);
