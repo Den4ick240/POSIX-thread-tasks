@@ -5,6 +5,7 @@
 
 #if defined(MULTITHREAD) || defined (THREADPOOL)
 #include <pthread.h>
+#include <semaphore.h>
 #endif
 #ifdef THREADPOOL
 #include "semaphore.h"
@@ -32,16 +33,21 @@
 #define SERVER_SEND_FLAGS MSG_NOSIGNAL
 
 #ifdef MULTITHREAD
-#define SERVER_OUT_HANDLER_BLOCK_FLAG 1
 #define SERVER_RECV_FLAGS 0
 #define CLIENT_RECV_FLAGS 0
 #else
-#define SERVER_OUT_HANDLER_BLOCK_FLAG 0
 #define SERVER_RECV_FLAGS MSG_DONTWAIT
-#define CLIENT_RECV_FLAGS
+#define CLIENT_RECV_FLAGS MSG_DONTWAIT
 #endif
 
-#define POLL_TIMEOUT 0
+#ifdef SINGLETHREAD
+#define THREAD_NUM 1
+#endif
+#ifdef THREADPOOL
+#define THREAD_NUM 8
+#endif
+
+#define POLL_TIMEOUT 1000
 #define HTTP_MSG_LEN_MAX 256
 #define MAX_HOST_NAME_LEN 253
 #define DEFAULT_PORT 80

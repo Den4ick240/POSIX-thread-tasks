@@ -1,4 +1,5 @@
 #include "consts.h"
+#ifdef MULTITHREAD
 #include "cache.h"
 #include "handlers.h"
 
@@ -29,6 +30,10 @@ int main(int argc, char *argv[]) {
     while (running) {
         int new_socket;
         new_socket = accept(listen_socket, NULL, NULL);
+        if (!running) {
+            close(new_socket);
+            break;
+        }
         if (new_socket == -1) {
             if (errno == EINTR)
                 continue;
@@ -38,8 +43,12 @@ int main(int argc, char *argv[]) {
         handle_new_connection(new_socket);
     }
     printf("running = %d, exiting\n", running);
+    sleep(1);
+    if (close(listen_socket) != 0)
+        perror("Couldn't close listen socket: ");
+    else
+        puts("Listen socket is closed");
     cache_map_destroy(&map);
-    close(listen_socket);
     pthread_exit((void *) NULL);
 }
 
@@ -69,10 +78,14 @@ int handle_args(int argc, char *argv[], struct sockaddr_in *my_addr) {
 }
 
 int init_listening_socket(int *sockfd, struct sockaddr_in *my_addr) {
+    int enable = 1;
     int listen_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_socket == -1) {
         fprintf(stderr, "Error: socket() failed with %s\n", strerror(errno));
         return -1;
+    }
+    if (setsockopt(listen_socket, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+        perror("setsockopt(SO_REUSEADDR) failed");
     }
     if (bind(listen_socket, (struct sockaddr *) my_addr, sizeof(*my_addr))) {
         fprintf(stderr, "Error: bind() failed with %s\n", strerror(errno));
@@ -95,31 +108,23 @@ int create_detached_thread(void *(*func)(void *), void *arg) {
     res = pthread_create(&thread, NULL, func, arg);
     pthread_attr_destroy(&attr);
     if (res < 0) {
-        fprintf(stderr, "Couldn't create new thread: %s\n", strerror(res));
+        fprintf(stderr, "Couldn't create new thread: %s\n", res);
         return -1;
     }
     return 0;
 }
 
-//#define RUN_HANDLER(a, b) while (running && res != HANDLER_ERROR) { \
-//    res = (a);                          \
-//    if (res == HANDLER_FINISHED) break; \
-//    if (res == HANDLER_CONTINUE || res == HANDLER_EINTR) continue; \
-//    fprintf(stderr, (b), strerror(errno));\
-//}
-
 void *server_thread(void *_arg) {
     struct server_handler_args *arg = (struct server_handler_args *) _arg;
-    int res;
-    puts("Starting sending request to server");
+    int res = HANDLER_CONTINUE;
+    printf("Starting sending request to server\n");
     while (running && res != HANDLER_ERROR) {
+        puts("t");
         res = server_handle_out(arg);
         if (res == HANDLER_FINISHED) break;
         if (res == HANDLER_CONTINUE || res == HANDLER_EINTR) continue;
         fprintf(stderr, "Error while sending data to server: %s\n", strerror(errno));
     }
-//    RUN_HANDLER(server_handle_out(arg),
-//                "Error while sending data to server: %s\n");
     puts("Sending request to server finished");
     while (running && res != HANDLER_ERROR) {
         res = server_handle_in(arg);
@@ -127,9 +132,7 @@ void *server_thread(void *_arg) {
         if (res == HANDLER_CONTINUE || res == HANDLER_EINTR) continue;
         fprintf(stderr, "Error while receiving data from server: %s\n", strerror(errno));
     }
-//    RUN_HANDLER(server_handle_in(arg),
-//                "Error while receiving data from server: %s\n");
-    puts("Finished receiving data from server");
+    printf("Finished receiving data from server %s\n", arg->cache->key);
     destroy_server(arg);
     pthread_exit(NULL);
 }
@@ -139,24 +142,21 @@ void *listen_client_thread(void *arg) {
     int sockfd = (int) arg;
     struct client_handler_args args;
     client_handler_args_init(&args, sockfd, run_server_handler_thread, &map);
+    printf("Starting receiving request from client: %d\n", sockfd);
     while (running && res != HANDLER_ERROR) {
-        res = client_handle_in(arg);
+        res = client_handle_in(&args);
         if (res == HANDLER_FINISHED) break;
         if (res == HANDLER_CONTINUE || res == HANDLER_EINTR) continue;
-        fprintf(stderr, "Error while receiving data from server: %s\n", strerror(errno));
+        fprintf(stderr, "Error while receiving data from client: %s\n", strerror(errno));
     }
+    printf("Finishing receiving request from client, starting sending data to client: %d\n", sockfd);
     while (running && res != HANDLER_ERROR) {
-        res = client_handle_out(arg);
+        res = client_handle_out(&args);
         if (res == HANDLER_FINISHED) break;
         if (res == HANDLER_CONTINUE || res == HANDLER_EINTR) continue;
-        fprintf(stderr, "Error while sending data to server: %s\n", strerror(errno));
+        fprintf(stderr, "Error while sending data to client: %s\n", strerror(errno));
     }
-//    RUN_HANDLER(client_handle_in(&args),
-//                "Error while receiving request from client: %s\n");
-//
-//    RUN_HANDLER(client_handle_out(&args),
-//                "Error while sending data to client: %s\n");
-
+    printf("Finished sending data to client: %d\n", sockfd);
     destroy_client(&args);
     pthread_exit(NULL);
 }
@@ -171,7 +171,6 @@ int run_server_handler_thread(struct server_handler_args *args) {
     return 0;
 }
 
-
 void handle_new_connection(int sockfd) {
     int res;
     printf("Starting handling new connection\n");
@@ -180,3 +179,4 @@ void handle_new_connection(int sockfd) {
         close(sockfd);
     }
 }
+#endif

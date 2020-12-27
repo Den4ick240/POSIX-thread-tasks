@@ -10,8 +10,10 @@ int arrayset_add(struct arrayset *set, void *element) {
     if (set->data_size == set->arr_size) {
         set->arr_size += (set->arr_size == 0 ? 1 : set->arr_size);
         set->arr = (void **)realloc(set->arr, set->arr_size * sizeof(void*));
-        if (set->arr == NULL)
+        if (set->arr == NULL) {
+            fprintf(stderr, "Couldn't allocate memory of size %d, for arrayset: %s\n", set->arr_size, strerror(errno));
             return -1;
+        }
     }
     set->arr[set->data_size] = element;
     set->data_size++;

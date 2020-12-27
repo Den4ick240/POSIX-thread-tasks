@@ -4,9 +4,9 @@
 #include "consts.h"
 #include "arrayset.h"
 
-#if defined(MULTITHREAD) || defined(THREADPOOL)
-#include "condrwlock.h"
-#endif
+//#if defined(MULTITHREAD) || defined(THREADPOOL)
+//#include "condrwlock.h"
+//#endif
 
 #define ECACHE_FINISHED -1
 #define ECACHE_WOULDBLOCK -2
@@ -14,6 +14,28 @@
 #define CACHE_CREATED 1
 #define CACHE_FOUND 2
 
+struct cache_node {
+    struct cache_node *next;
+    int data_len;
+    char bytes[];
+};
+
+struct cache {
+#if defined(MULTITHREAD) || defined(THREADPOOL)
+//    struct cond_rwlock cond_rwlock;             //this rwlock used to synchronize reading from cache and writing to cache
+    pthread_mutex_t mutex;                      //this mutex used to synchronize access to the users_cnt variable
+#endif
+#ifdef MULTITHREAD
+    pthread_cond_t cacheCond;
+    pthread_mutex_t cacheMutex;
+#endif
+    struct timeval last_used_time;              //this time is updated when someone stops using cache
+    int finished;                               //if this flag is not zero, than no one supposed to write data to this cache anymore
+    int users_cnt;                              //number of threads, using this cache. When every thread calls cache_release(),
+    //this variable becomes 0 and than the cache is deleted
+    struct cache_node *first, *last;            //first and last elements of the queue
+    char key[CACHE_KEY_MAX_SIZE];               //key associated with that cache, usually it is host + path parsed from http request
+};
 
 struct cache;
 struct cache_reader {
@@ -59,7 +81,7 @@ int cache_add_bytes(struct cache *cache, char *bytes, int len);
 void cache_init_reader(struct cache *cache, struct cache_reader *reader);
 
 //if block_flag is not 0, cache is not finished but doesn't have new data at the moment, this function will block until there is new data available
-int cache_reader_get_bytes(struct cache_reader *reader, char **buffer, int block_flag);
+int cache_reader_get_bytes(struct cache_reader *reader, char **buffer);
 
 int cache_reader_skip_bytes(struct cache_reader *reader, int bytes_num);
 

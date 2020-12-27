@@ -1,23 +1,6 @@
 #include "cache.h"
 
-struct cache_node {
-    struct cache_node *next;
-    int data_len;
-    char bytes[];
-};
 
-struct cache {
-#if defined(MULTITHREAD) || defined(THREADPOOL)
-    struct cond_rwlock cond_rwlock;             //this rwlock used to synchronize reading from cache and writing to cache
-    pthread_mutex_t mutex;                      //this mutex used to synchronize access to the users_cnt variable
-#endif
-    struct timeval last_used_time;              //this time is updated when someone stops using cache
-    int finished;                               //if this flag is not zero, than no one supposed to write data to this cache anymore
-    int users_cnt;                              //number of threads, using this cache. When every thread calls cache_release(),
-                                                //this variable becomes 0 and than the cache is deleted
-    struct cache_node *first, *last;            //first and last elements of the queue
-    char key[CACHE_KEY_MAX_SIZE];               //key associated with that cache, usually it is host + path parsed from http request
-};
 
 int update_time_func(struct timeval *time) {
     return gettimeofday(time, NULL);
@@ -61,6 +44,7 @@ struct cache *cache_map_get_or_create(struct cache_map *cache_map, char *key, in
 #endif
     puts("Looking for cache in cache map");
     puts(key);
+    puts("---------");
     for (i = 0; i < cache_map->arrayset.data_size; i++) {
         cache = (struct cache *) cache_map->arrayset.arr[i];
         puts(cache->key);
@@ -70,12 +54,14 @@ struct cache *cache_map_get_or_create(struct cache_map *cache_map, char *key, in
         }
         cache = NULL;
     }
+    puts("---------");
     if (cache == NULL) {
         puts("No cache found");
         if (cache_map->arrayset.data_size == CACHE_MAP_SIZE && remove_oldest_cache(cache_map) != 0) {
 #if defined(MULTITHREAD) || defined(THREADPOOL)
             pthread_mutex_unlock(&cache_map->mutex);
 #endif
+            fprintf(stderr, "Couldn't add new cache to map because cache map is full\n");
             return NULL;
         }
         cache = cache_create(key);
@@ -113,32 +99,41 @@ void free_elem(void *elem) {
 }
 
 int cache_map_destroy(struct cache_map *cache_map) {
+    printf("Destroying cache containing %d elements\n", cache_map->arrayset.data_size);
 #if defined(MULTITHREAD) || defined(THREADPOOL)
     int res = pthread_mutex_destroy(&cache_map->mutex);
     if (res < 0) return res;
 #endif
     arrayset_free(&cache_map->arrayset, free_elem);
+    //puts("Cache destroyed");
     return 0;
 }
 
 struct cache *cache_create(char *key) {
     struct cache *cache = (struct cache *) malloc(sizeof(struct cache));
-    puts("Creating cache");
+//    puts("Creating cache");
     if (cache == NULL) {
-        perror("couldn't allocate cacche structure");
+        perror("Couldn't allocate cache structure:");
         return NULL;
     }
     strncpy(cache->key, key, CACHE_KEY_MAX_SIZE);
-    printf("cache: %.*s created\n", CACHE_KEY_MAX_SIZE, cache->key);
+//    printf("cache: %.*s created\n", CACHE_KEY_MAX_SIZE, cache->key);
 #if defined(MULTITHREAD) || defined(THREADPOOL)
-    int res = cond_rwlock_init(&cache->cond_rwlock);
-    if (res < 0) {
+//    int res = cond_rwlock_init(&cache->cond_rwlock);
+//    if (res < 0) {
+//        free(cache);
+//        return NULL;
+//    }
+    if (pthread_mutex_init(&cache->mutex, NULL) < 0) {
         free(cache);
         return NULL;
     }
-    res = pthread_mutex_init(&cache->mutex, NULL);
-    if (res < 0) {
-        cond_rwlock_destroy(&cache->cond_rwlock);
+#endif
+#ifdef MULTITHREAD
+    if (pthread_mutex_init(&cache->cacheMutex, NULL) != 0 || pthread_cond_init(&cache->cacheCond, NULL) != 0) {
+        pthread_mutex_destroy(&cache->mutex);
+        pthread_mutex_destroy(&cache->cacheMutex);
+        pthread_cond_destroy(&cache->cacheCond);
         free(cache);
         return NULL;
     }
@@ -159,7 +154,7 @@ void cache_release(struct cache **_cache) {
     pthread_mutex_lock(&cache->mutex);
 #endif
     cache->users_cnt--;
-    printf("%s:\n cache users: %d\n", cache->key, cache->users_cnt);
+//    printf("%s:\n cache users: %d\n", cache->key, cache->users_cnt);
     update_time_func(&cache->last_used_time);
 #if defined(MULTITHREAD) || defined(THREADPOOL)
     pthread_mutex_unlock(&cache->mutex);
@@ -174,8 +169,12 @@ void cache_release(struct cache **_cache) {
         }
         free(cache);
 #if defined(MULTITHREAD) || defined(THREADPOOL)
-        cond_rwlock_destroy(&cache->cond_rwlock);
+//        cond_rwlock_destroy(&cache->cond_rwlock);
         pthread_mutex_destroy(&cache->mutex);
+#endif
+#ifdef MULTITHREAD
+        pthread_mutex_destroy(&cache->cacheMutex);
+        pthread_cond_destroy(&cache->cacheCond);
 #endif
     }
 }
@@ -185,15 +184,22 @@ void cache_add_user(struct cache *cache) {
     pthread_mutex_lock(&cache->mutex);
 #endif
     cache->users_cnt++;
-    printf("%s:\n cache users: %d\n", cache->key, cache->users_cnt);
+//    printf("%s:\n cache users: %d\n", cache->key, cache->users_cnt);
 #if defined(MULTITHREAD) || defined(THREADPOOL)
     pthread_mutex_unlock(&cache->mutex);
 #endif
 }
 
 void cache_finish(struct cache *cache) {
+#ifdef MULTITHREAD
+    pthread_mutex_lock(&cache->cacheMutex);
+#endif
     cache->finished = 1;
-    cond_rwlock_drop(&cache->cond_rwlock);
+#ifdef MULTITHREAD
+    pthread_cond_broadcast(&cache->cacheCond);
+    pthread_mutex_unlock(&cache->cacheMutex);
+#endif
+//    cond_rwlock_drop(&cache->cond_rwlock);
 }
 
 int cache_add_bytes(struct cache *cache, char *bytes, int len) {
@@ -205,8 +211,9 @@ int cache_add_bytes(struct cache *cache, char *bytes, int len) {
     memcpy(node->bytes, bytes, sizeof(char) * len);
     node->data_len = len;
     node->next = NULL;
-#if defined(MULTITHREAD) || defined(THREADPOOL)
-    cond_rwlock_wrlock(&cache->cond_rwlock);
+#if defined(MULTITHREAD)
+//    cond_rwlock_wrlock(&cache->cond_rwlock);
+    pthread_mutex_lock(&cache->cacheMutex);
 #endif
     if (cache->first == NULL) {
         cache->last = node;
@@ -215,8 +222,10 @@ int cache_add_bytes(struct cache *cache, char *bytes, int len) {
         cache->last->next = node;
         cache->last = node;
     }
-#if defined(MULTITHREAD) || defined(THREADPOOL)
-    cond_rwlock_wrunlock(&cache->cond_rwlock);
+#if defined(MULTITHREAD)
+//    cond_rwlock_wrunlock(&cache->cond_rwlock);
+    pthread_cond_broadcast(&cache->cacheCond);
+    pthread_mutex_unlock(&cache->cacheMutex);
 #endif
     return 0;
 }
@@ -228,13 +237,13 @@ void cache_init_reader(struct cache *cache, struct cache_reader *reader) {
         puts("Initializing reader on NULL cache");
         return;
     }
-#if defined(MULTITHREAD) || defined(THREADPOOL)
-    cond_rwlock_rdlock(&cache->cond_rwlock);
-#endif
+//#if defined(MULTITHREAD) || defined(THREADPOOL)
+//    cond_rwlock_rdlock(&cache->cond_rwlock);
+//#endif
     reader->cache_node = cache->first;
-#if defined(MULTITHREAD) || defined(THREADPOOL)
-    cond_rwlock_rdunlock(&cache->cond_rwlock);
-#endif
+//#if defined(MULTITHREAD) || defined(THREADPOOL)
+//    cond_rwlock_rdunlock(&cache->cond_rwlock);
+//#endif
     cache_add_user(cache);
 }
 
@@ -245,45 +254,71 @@ int cache_reader_has_data_available(struct cache_reader *reader) {
              reader->offset < reader->cache_node->data_len));
 }
 
-int predicate(void *arg) {
-    return cache_reader_has_data_available((struct cache_reader *) arg);
+//int predicate(void *arg) {
+//    return cache_reader_has_data_available((struct cache_reader *) arg);
+//}
+
+int move_to_next_node(struct cache_reader *reader, char **buffer) {
+    if (reader->cache_node == NULL) {
+        reader->cache_node = reader->cache->first;
+    } else {
+        reader->cache_node = reader->cache_node->next;
+    }
+    reader->offset = 0;
+    *buffer = reader->cache_node->bytes;
+    return reader->cache_node->data_len;
 }
 
-int cache_reader_get_bytes(struct cache_reader *reader, char **buffer, int block_flag) {
+int cache_reader_get_bytes(struct cache_reader *reader, char **buffer) {
     struct cache *cache = reader->cache;
     int res;
+
+    if (reader->cache->finished && !cache_reader_has_data_available(reader)) return ECACHE_FINISHED;
 
     if (reader->cache_node != NULL && reader->offset < reader->cache_node->data_len) {
         *buffer = reader->cache_node->bytes + reader->offset;
         return reader->cache_node->data_len - reader->offset;
     }
 
-#if defined(MULTITHREAD) || defined(THREADPOOL)
-    if (block_flag) {
-        cond_rwlock_wait_and_rdlock(&cache->cond_rwlock, predicate, reader);
-    } else {
-        cond_rwlock_rdlock(&cache->cond_rwlock);
+    if (cache_reader_has_data_available(reader)) {
+        return move_to_next_node(reader, buffer);
+    }
+#if defined(MULTITHREAD)
+    pthread_mutex_lock(&cache->cacheMutex);
+    while (!cache_reader_has_data_available(reader) && !cache->finished) {
+        pthread_cond_wait(&cache->cacheCond, &cache->cacheMutex);
+    }
+    pthread_mutex_unlock(&cache->cacheMutex);
+    if (cache_reader_has_data_available(reader)) {
+        return move_to_next_node(reader, buffer);
+    } else if (cache->finished) {
+        return ECACHE_FINISHED;
     }
 #endif
-    if (!cache_reader_has_data_available(reader)) {
-        res = (cache->finished ? ECACHE_FINISHED : ECACHE_WOULDBLOCK);
-    } else {
-        if (reader->cache_node == NULL) {
-            reader->cache_node = cache->first;
-            reader->offset = 0;
-        }
-        if (reader->cache_node->data_len == reader->offset) {
-            reader->cache_node = reader->cache_node->next;
-            reader->offset = 0;
-        }
-        *buffer = reader->cache_node->bytes + reader->offset;
-        res = reader->cache_node->data_len - reader->offset;
-    }
-#if defined(MULTITHREAD) || defined(THREADPOOL)
-    cond_rwlock_rdunlock(&cache->cond_rwlock);
-#endif
-    return res;
+    return ECACHE_WOULDBLOCK;
 }
+//    if (block_flag) {
+//        cond_rwlock_wait_and_rdlock(&cache->cond_rwlock, predicate, reader);
+//    } else {
+//        cond_rwlock_rdlock(&cache->cond_rwlock);
+//    }
+//    if (!cache_reader_has_data_available(reader)) {
+//        res = (cache->finished ? ECACHE_FINISHED : ECACHE_WOULDBLOCK);
+//    } else {
+//        if (reader->cache_node == NULL) {
+//            reader->cache_node = cache->first;
+//        } else {
+//            reader->cache_node = reader->cache_node->next;
+//        }
+//        *buffer = reader->cache_node->bytes;
+//        res = reader->cache_node->data_len;
+//        res = move_to_next_node(reader, buffer);
+//    }
+//#if defined(MULTITHREAD) || defined(THREADPOOL)
+//    cond_rwlock_rdunlock(&cache->cond_rwlock);
+//#endif
+//    return res;
+//}
 
 int cache_reader_skip_bytes(struct cache_reader *reader, int bytes_num) {
     reader->offset += bytes_num;

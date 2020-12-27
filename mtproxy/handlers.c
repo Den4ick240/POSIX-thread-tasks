@@ -33,14 +33,17 @@ void try_parsing_response(struct server_handler_args *args, char *buffer, int re
     printf("---------------------------------------------\n"//Дебажный вывод надо будет убрать
            "received RESPONSE:"
            "%.*s\n"
-           "---------------------------------------------\n", (int)args->header_buffer.data_len, args->header_buffer.buffer);
+           "---------------------------------------------\n", (int) args->header_buffer.data_len,
+           args->header_buffer.buffer);
     args->header_finished_flag = 1;
     realloc_buffer_destroy(&args->header_buffer);
 }
 
 int server_handle_in(struct server_handler_args *args) {
     char buffer[SERVER_RECV_BUFFER_SIZE];
+//    printf("######################################Receiving from server... \n");
     int res = recv(args->socket, buffer, SERVER_RECV_BUFFER_SIZE, SERVER_RECV_FLAGS);
+//    printf("##################################done receiving from server %d\n", res);
     if (res < 0) {
         if (errno == EINTR) return HANDLER_EINTR;
         cache_map_remove(args->cache_map, args->cache);
@@ -63,8 +66,9 @@ int server_handle_in(struct server_handler_args *args) {
 int server_handle_out(struct server_handler_args *args) {
     char *bytes;
     int res;
-
-    res = cache_reader_get_bytes(&args->reader, &bytes, SERVER_OUT_HANDLER_BLOCK_FLAG);
+    puts("getting bytes");
+    res = cache_reader_get_bytes(&args->reader, &bytes);
+    puts("got bytes");
     if (res == ECACHE_FINISHED) {
         cache_reader_release_cache(&args->reader);
         return HANDLER_FINISHED;
@@ -116,10 +120,11 @@ int connect_to_server(char *host) {
     return sock;
 }
 
-int start_server(struct client_handler_args *client, struct cache *cache, char *key, char *host) {
+int start_server(struct client_handler_args *client, struct cache *cache, char *key, char *host,
+                 struct cache *server_request_cache) {
     int res;
     struct server_handler_args *server = (struct server_handler_args *) malloc(sizeof(struct server_handler_args));
-    struct cache *server_request_cache;
+
     if (server == NULL) {
         perror(strerror(errno));
         return -1;
@@ -132,18 +137,11 @@ int start_server(struct client_handler_args *client, struct cache *cache, char *
     if (server->socket < 0) {
         return -1;
     }
-    server_request_cache = cache_create("SERVER REQUEST CACHE");
-    if (server_request_cache == NULL) {
-        return -1;
-    }
 
-    res = cache_add_bytes(server_request_cache, client->request_buffer.buffer, client->request_buffer.data_len);
-    if (res < 0) {
-        return -1;
-    }
+
     cache_init_reader(server_request_cache, &server->reader);
-    cache_finish(server_request_cache);
-    cache_release(&server_request_cache);
+//    cache_finish(server_request_cache);
+//    cache_release(&server_request_cache);
     server->cache_map = client->cache_map;
     server->cache = cache;
     cache_add_user(cache);
@@ -168,6 +166,7 @@ int client_handle_request(struct client_handler_args *client,
     char key[CACHE_KEY_MAX_SIZE];
     int cache_created_flag, i;
     struct cache *cache;
+    int error = 0;
 
     if (minor_version == 9) {
         perror("Unsupported http version\n");
@@ -190,12 +189,13 @@ int client_handle_request(struct client_handler_args *client,
         return HANDLER_ERROR;
     }
     i = strlen(host);
-    if (path_len + i < CACHE_KEY_MAX_SIZE) {
-        perror("Path is too long");
+    if (path_len + i >= CACHE_KEY_MAX_SIZE) {
+        printf("Path is to long %d, %d, %.*s\n", path_len, i, path_len, path);
+        return HANDLER_ERROR;
     }
     strcpy(key, host);
     strncat(key, path, path_len);
-    if (strncmp(method, "GET\0", method_len) != 0) {
+    if (strncmp(method, "GET\0", method_len)) {
         printf("Method %.*s is not supposed to be cached\n", method_len, method);
         cache = cache_create(key);
         cache_created_flag = CACHE_CREATED;
@@ -212,14 +212,37 @@ int client_handle_request(struct client_handler_args *client,
     }
     printf("Cache created flag value: %d\n", cache_created_flag);
     if (cache_created_flag == CACHE_CREATED) {
-        if (start_server(client, cache, key, host) < 0) {
-            cache_release(&cache);
-            cache = NULL;
-            realloc_buffer_destroy(&client->request_buffer);
-            return HANDLER_ERROR;
+        struct cache *server_request_cache = cache_create("SERVER REQUEST CACHE");
+        if (server_request_cache == NULL) {
+            error = 1;
+        } else {
+            if (start_server(client, cache, key, host, server_request_cache) < 0) {
+                error = 1;
+            } else if (strncmp(method, "GET\0", method_len) == 0) {
+                char *get = "GET ";
+                char *http_and_host = " HTTP/1.0\r\nHost: ";
+                char *end = "\r\n\r\n";
+                cache_add_bytes(server_request_cache, get, strlen(get));
+                cache_add_bytes(server_request_cache, path, path_len);
+                cache_add_bytes(server_request_cache, http_and_host, strlen(http_and_host));
+                cache_add_bytes(server_request_cache, host, strlen(host));
+                cache_add_bytes(server_request_cache, end, strlen(end));
+            } else {
+                if (cache_add_bytes(server_request_cache, client->request_buffer.buffer,
+                                    client->request_buffer.data_len) != 0) {
+                    error = 1;
+                }
+            }
+            cache_finish(server_request_cache);
+            cache_release(&server_request_cache);
         }
     }
-
+    if (error) {
+        cache_release(&cache);
+        cache = NULL;
+        realloc_buffer_destroy(&client->request_buffer);
+        return HANDLER_ERROR;
+    }
     cache_init_reader(cache, &client->reader);
     cache_release(&cache);
     realloc_buffer_destroy(&client->request_buffer);
@@ -233,8 +256,12 @@ int client_handle_in(struct client_handler_args *client) {
     char *method, *path;
 
     rret = realloc_buffer_recv(client->socket, &client->request_buffer, CLIENT_RECV_BUFFER_LENGTH, CLIENT_RECV_FLAGS);
-    if (rret <= 0) {
-        if (errno == HANDLER_EINTR) {
+    if (rret == 0) {
+        puts("Client closed connection before the request have been red");
+        return HANDLER_ERROR;
+    }
+    if (rret < 0) {
+        if (errno == EINTR) {
             return HANDLER_EINTR;
         }
         fprintf(stderr, "Couldn't read request from client: %s\n", strerror(errno));
@@ -247,23 +274,23 @@ int client_handle_in(struct client_handler_args *client) {
 
     if (pret == -2) return HANDLER_CONTINUE; //continue receiving request as it was not fully received
     if (pret == -1) {
-        fprintf(stderr, "Couldn't parse request from client: %s\n", strerror(errno));
+        fprintf(stderr, "Couldn't parse request from client\n");
         return HANDLER_ERROR;
     }
-    printf("---------------------------------------------\n"
-           "received request:"
-           "%.*s\n"
-           "---------------------------------------------\n", pret, client->request_buffer.buffer);
+    printf("--------REQUEST FROM CLIENT-------------------------------------\n"
+           "%.*s"
+           "----------------------------------------------------------------\n",
+           client->request_buffer.data_len, client->request_buffer.buffer);
+    shutdown(client->socket, SHUT_RD);
     return client_handle_request(client, headers, num_headers, path, path_len, minor_version, method, method_len);
 }
 
 int client_handle_out(struct client_handler_args *args) {
     int res;
     char *bytes;
-    res = cache_reader_get_bytes(&args->reader, &bytes, SERVER_OUT_HANDLER_BLOCK_FLAG);
+    res = cache_reader_get_bytes(&args->reader, &bytes);
     if (res == ECACHE_WOULDBLOCK) return HANDLER_CONTINUE;
     if (res == ECACHE_FINISHED) {
-        puts("client finished");
         cache_reader_release_cache(&args->reader);
         return HANDLER_FINISHED;
     }
